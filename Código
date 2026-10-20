@@ -1,0 +1,1335 @@
+# =====================================================================
+# MODULO GRAFICO FINAL - ARTIGO POS-DOC CAUNESP
+# 6 FIGURAS PRINCIPAIS, SEM REDUNDANCIA
+# =====================================================================
+#
+# Este script NAO refaz toda a modelagem.
+# Ele usa o Excel ja gerado pelo script principal:
+#
+# C:/Users/mtank/Downloads/Nova pasta (24)/
+# RESULTADOS_ARTIGO_POS_DOC/RESULTADOS_ARTIGO_POS_DOC.xlsx
+#
+# Saida:
+# C:/Users/mtank/Downloads/Nova pasta (24)/
+# RESULTADOS_ARTIGO_POS_DOC/FIGURAS_ARTIGO_FINAL/
+#
+# Figuras:
+# 1) Producao + participacao no setor
+# 2) Ingredientes + choques economicos/financeiros
+# 3) Producao x fatores economicos (rho de Spearman)
+# 4) Producao x ambiente (rho de Spearman)
+# 5) Heatmap seletivo por blocos
+# 6) Diagnostico completo dos modelos (4 paineis)
+#
+# =====================================================================
+
+rm(list = ls())
+graphics.off()
+cat("\014")
+options(scipen = 999)
+
+# =====================================================================
+# 1. PACOTES
+# =====================================================================
+
+pacotes <- c(
+  "readxl",
+  "dplyr",
+  "tidyr",
+  "stringr",
+  "lubridate",
+  "ggplot2",
+  "patchwork",
+  "scales",
+  "corrplot",
+  "tibble"
+)
+
+faltantes <- pacotes[
+  !pacotes %in% rownames(installed.packages())
+]
+
+if (length(faltantes) > 0) {
+  install.packages(
+    faltantes,
+    dependencies = TRUE,
+    type = "binary"
+  )
+}
+
+invisible(
+  lapply(
+    pacotes,
+    library,
+    character.only = TRUE
+  )
+)
+
+# =====================================================================
+# 2. CAMINHOS
+# =====================================================================
+
+arquivo_resultados <- paste0(
+  "C:/Users/mtank/Downloads/",
+  "Nova pasta (24)/",
+  "RESULTADOS_ARTIGO_POS_DOC/",
+  "RESULTADOS_ARTIGO_POS_DOC.xlsx"
+)
+
+if (!file.exists(arquivo_resultados)) {
+  stop(
+    paste0(
+      "\nArquivo de resultados nao encontrado:\n",
+      arquivo_resultados,
+      "\n\nRode primeiro o script principal de analise."
+    )
+  )
+}
+
+pasta_saida <- file.path(
+  dirname(arquivo_resultados),
+  "FIGURAS_ARTIGO_FINAL"
+)
+
+if (!dir.exists(pasta_saida)) {
+  dir.create(
+    pasta_saida,
+    recursive = TRUE
+  )
+}
+
+# =====================================================================
+# 3. FUNCOES
+# =====================================================================
+
+padronizar_nomes <- function(nomes) {
+  
+  nomes |>
+    stringr::str_replace_all("\ufeff", "") |>
+    stringr::str_trim() |>
+    iconv(
+      from = "",
+      to = "ASCII//TRANSLIT"
+    ) |>
+    stringr::str_to_lower() |>
+    stringr::str_replace_all(
+      "[^a-z0-9_]+",
+      "_"
+    ) |>
+    stringr::str_replace_all(
+      "_+",
+      "_"
+    ) |>
+    stringr::str_remove("^_") |>
+    stringr::str_remove("_$")
+}
+
+zscore_seguro <- function(x) {
+  
+  if (
+    all(is.na(x)) ||
+    sum(!is.na(x)) < 2 ||
+    sd(x, na.rm = TRUE) == 0
+  ) {
+    return(
+      rep(
+        NA_real_,
+        length(x)
+      )
+    )
+  }
+  
+  as.numeric(
+    scale(x)
+  )
+}
+
+p_sig <- function(p) {
+  
+  dplyr::case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ ""
+  )
+}
+
+tema_artigo <- ggplot2::theme_minimal(
+  base_size = 11
+) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      face = "bold",
+      size = 13
+    ),
+    plot.subtitle = ggplot2::element_text(
+      size = 10
+    ),
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    legend.position = "bottom",
+    panel.grid.minor = ggplot2::element_blank(),
+    strip.text = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+# =====================================================================
+# 4. IMPORTAR ABAS
+# =====================================================================
+
+abas <- readxl::excel_sheets(
+  arquivo_resultados
+)
+
+cat("\nAbas encontradas:\n")
+print(abas)
+
+ler_aba <- function(nome) {
+  
+  if (!nome %in% abas) {
+    stop(
+      paste0(
+        "A aba '",
+        nome,
+        "' nao existe no Excel."
+      )
+    )
+  }
+  
+  x <- readxl::read_excel(
+    arquivo_resultados,
+    sheet = nome
+  )
+  
+  names(x) <- padronizar_nomes(
+    names(x)
+  )
+  
+  x
+}
+
+base_mensal <- ler_aba(
+  "Base_mensal"
+)
+
+base_anual <- ler_aba(
+  "Base_anual_integrada"
+)
+
+metricas <- ler_aba(
+  "Metricas_modelos"
+)
+
+shap <- ler_aba(
+  "SHAP"
+)
+
+previsoes <- ler_aba(
+  "Previsoes_teste"
+)
+
+# Converter data quando necessario
+if ("data" %in% names(base_mensal)) {
+  base_mensal$data <- as.Date(
+    base_mensal$data
+  )
+}
+
+if ("data" %in% names(previsoes)) {
+  previsoes$data <- as.Date(
+    previsoes$data
+  )
+}
+
+# =====================================================================
+# 5. FIGURA 1
+# PRODUCAO AQUICOLA + PARTICIPACAO DA TILAPIA E NATIVOS
+# =====================================================================
+
+vars_producao <- intersect(
+  c(
+    "producao_tilapia_t",
+    "producao_peixes_t",
+    "producao_nativos_t"
+  ),
+  names(base_anual)
+)
+
+prod_long <- base_anual |>
+  dplyr::select(
+    ano,
+    dplyr::all_of(
+      vars_producao
+    )
+  ) |>
+  tidyr::pivot_longer(
+    cols = -ano,
+    names_to = "serie",
+    values_to = "producao"
+  ) |>
+  dplyr::filter(
+    !is.na(producao)
+  ) |>
+  dplyr::mutate(
+    serie = dplyr::recode(
+      serie,
+      producao_tilapia_t = "Tilapia",
+      producao_peixes_t = "Peixes totais",
+      producao_nativos_t = "Peixes nativos"
+    )
+  )
+
+p1a <- ggplot2::ggplot(
+  prod_long,
+  ggplot2::aes(
+    x = ano,
+    y = producao,
+    linetype = serie,
+    shape = serie
+  )
+) +
+  ggplot2::geom_line(
+    linewidth = 0.9
+  ) +
+  ggplot2::geom_point(
+    size = 2.3
+  ) +
+  ggplot2::scale_y_continuous(
+    labels = scales::label_number(
+      big.mark = ".",
+      decimal.mark = ","
+    )
+  ) +
+  ggplot2::labs(
+    title = "A. Evolucao da producao aquicola",
+    x = "Ano",
+    y = "Producao (t)",
+    linetype = NULL,
+    shape = NULL
+  ) +
+  tema_artigo
+
+vars_participacao <- intersect(
+  c(
+    "participacao_tilapia_pct",
+    "participacao_nativos_pct"
+  ),
+  names(base_anual)
+)
+
+if (length(vars_participacao) >= 1) {
+  
+  part_long <- base_anual |>
+    dplyr::select(
+      ano,
+      dplyr::all_of(
+        vars_participacao
+      )
+    ) |>
+    tidyr::pivot_longer(
+      cols = -ano,
+      names_to = "serie",
+      values_to = "participacao"
+    ) |>
+    dplyr::filter(
+      !is.na(participacao)
+    ) |>
+    dplyr::mutate(
+      serie = dplyr::recode(
+        serie,
+        participacao_tilapia_pct = "Tilapia",
+        participacao_nativos_pct = "Nativos"
+      )
+    )
+  
+  p1b <- ggplot2::ggplot(
+    part_long,
+    ggplot2::aes(
+      x = ano,
+      y = participacao,
+      linetype = serie,
+      shape = serie
+    )
+  ) +
+    ggplot2::geom_line(
+      linewidth = 0.9
+    ) +
+    ggplot2::geom_point(
+      size = 2.3
+    ) +
+    ggplot2::labs(
+      title = "B. Participacao relativa na producao",
+      x = "Ano",
+      y = "Participacao (%)",
+      linetype = NULL,
+      shape = NULL
+    ) +
+    tema_artigo
+  
+} else {
+  
+  p1b <- ggplot2::ggplot() +
+    ggplot2::annotate(
+      "text",
+      x = 1,
+      y = 1,
+      label = "Participacoes percentuais nao disponiveis"
+    ) +
+    ggplot2::theme_void()
+}
+
+fig1 <- p1a / p1b +
+  patchwork::plot_annotation(
+    title = "Figura 1. Dinamica da producao aquicola brasileira"
+  )
+
+ggplot2::ggsave(
+  file.path(
+    pasta_saida,
+    "FIGURA_1_PRODUCAO_E_PARTICIPACAO.png"
+  ),
+  fig1,
+  width = 11,
+  height = 9,
+  dpi = 320
+)
+
+# =====================================================================
+# 6. FIGURA 2
+# INGREDIENTES + CHOQUES DE MERCADO E RISCO
+# =====================================================================
+
+vars_ing <- intersect(
+  c(
+    "indice_milho_2016_100",
+    "indice_soja_2016_100",
+    "indice_custo_ingredientes_racao"
+  ),
+  names(base_mensal)
+)
+
+ing_long <- base_mensal |>
+  dplyr::select(
+    data,
+    dplyr::all_of(vars_ing)
+  ) |>
+  tidyr::pivot_longer(
+    cols = -data,
+    names_to = "serie",
+    values_to = "indice"
+  ) |>
+  dplyr::mutate(
+    serie = dplyr::recode(
+      serie,
+      indice_milho_2016_100 = "Milho",
+      indice_soja_2016_100 = "Soja",
+      indice_custo_ingredientes_racao = "Indice sintetico"
+    )
+  )
+
+p2a <- ggplot2::ggplot(
+  ing_long,
+  ggplot2::aes(
+    x = data,
+    y = indice,
+    linetype = serie
+  )
+) +
+  ggplot2::annotate(
+    "rect",
+    xmin = as.Date("2020-03-01"),
+    xmax = as.Date("2021-12-31"),
+    ymin = -Inf,
+    ymax = Inf,
+    alpha = 0.07
+  ) +
+  ggplot2::annotate(
+    "rect",
+    xmin = as.Date("2022-02-01"),
+    xmax = as.Date("2022-12-31"),
+    ymin = -Inf,
+    ymax = Inf,
+    alpha = 0.07
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.9
+  ) +
+  ggplot2::labs(
+    title = "A. Ingredientes e indice sintetico de custo",
+    subtitle = "Base 2016 = 100; faixas indicam 2020-2021 e choque de 2022",
+    x = NULL,
+    y = "Indice",
+    linetype = NULL
+  ) +
+  tema_artigo
+
+vars_risco <- intersect(
+  c(
+    "vix",
+    "brent_usd",
+    "oni",
+    "precipitacao_mm",
+    "temperatura_media_c"
+  ),
+  names(base_mensal)
+)
+
+risco_z <- base_mensal |>
+  dplyr::select(
+    data,
+    dplyr::all_of(vars_risco)
+  )
+
+for (v in vars_risco) {
+  risco_z[[v]] <- zscore_seguro(
+    risco_z[[v]]
+  )
+}
+
+risco_long <- risco_z |>
+  tidyr::pivot_longer(
+    cols = -data,
+    names_to = "serie",
+    values_to = "z"
+  ) |>
+  dplyr::mutate(
+    serie = dplyr::recode(
+      serie,
+      vix = "VIX",
+      brent_usd = "Brent",
+      oni = "ONI",
+      precipitacao_mm = "Precipitacao",
+      temperatura_media_c = "Temperatura"
+    )
+  )
+
+p2b <- ggplot2::ggplot(
+  risco_long,
+  ggplot2::aes(
+    x = data,
+    y = z,
+    linetype = serie
+  )
+) +
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linetype = "dotted"
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.75,
+    na.rm = TRUE
+  ) +
+  ggplot2::labs(
+    title = "B. Risco, energia e ambiente",
+    subtitle = "Series padronizadas em z-score",
+    x = "Data",
+    y = "Z-score",
+    linetype = NULL
+  ) +
+  tema_artigo
+
+fig2 <- p2a / p2b +
+  patchwork::plot_annotation(
+    title = "Figura 2. Custos dos ingredientes e choques externos"
+  )
+
+ggplot2::ggsave(
+  file.path(
+    pasta_saida,
+    "FIGURA_2_CUSTOS_E_CHOQUES.png"
+  ),
+  fig2,
+  width = 12,
+  height = 9,
+  dpi = 320
+)
+
+# =====================================================================
+# 7. FUNCAO DE CORRELACAO PARA FIGURAS 3 E 4
+# =====================================================================
+
+calcular_correlacoes <- function(
+    dados,
+    respostas,
+    preditores
+) {
+  
+  resultados <- list()
+  
+  for (resp in respostas) {
+    
+    if (!resp %in% names(dados)) {
+      next
+    }
+    
+    for (pred in preditores) {
+      
+      if (!pred %in% names(dados)) {
+        next
+      }
+      
+      temp <- dados |>
+        dplyr::select(
+          dplyr::all_of(
+            c(
+              resp,
+              pred
+            )
+          )
+        ) |>
+        tidyr::drop_na()
+      
+      if (
+        nrow(temp) < 5 ||
+        length(unique(temp[[pred]])) < 3
+      ) {
+        next
+      }
+      
+      teste <- suppressWarnings(
+        stats::cor.test(
+          temp[[resp]],
+          temp[[pred]],
+          method = "spearman",
+          exact = FALSE
+        )
+      )
+      
+      resultados[[length(resultados) + 1]] <-
+        tibble::tibble(
+          resposta = resp,
+          preditor = pred,
+          n = nrow(temp),
+          rho = unname(
+            teste$estimate
+          ),
+          p = teste$p.value
+        )
+    }
+  }
+  
+  dplyr::bind_rows(
+    resultados
+  )
+}
+
+# =====================================================================
+# 8. FIGURA 3
+# PRODUCAO X FATORES ECONOMICOS
+# =====================================================================
+
+respostas_prod <- intersect(
+  c(
+    "producao_tilapia_t",
+    "producao_peixes_t",
+    "producao_nativos_t"
+  ),
+  names(base_anual)
+)
+
+pred_economia <- intersect(
+  c(
+    "indice_custo_ingredientes_media",
+    "milho_rs_media",
+    "milho_rs_media_modelo",
+    "soja_rs_media_modelo",
+    "soja_paranagua_rs_media",
+    "dolar_rs_usd",
+    "diesel_rs_litro",
+    "ipca_pct",
+    "igpm_pct",
+    "selic_pct",
+    "brent_usd_media_modelo",
+    "vix_media_modelo"
+  ),
+  names(base_anual)
+)
+
+cor_econ <- calcular_correlacoes(
+  base_anual,
+  respostas_prod,
+  pred_economia
+) |>
+  dplyr::mutate(
+    resposta = dplyr::recode(
+      resposta,
+      producao_tilapia_t = "Tilapia",
+      producao_peixes_t = "Peixes totais",
+      producao_nativos_t = "Peixes nativos"
+    ),
+    preditor = dplyr::recode(
+      preditor,
+      indice_custo_ingredientes_media = "Indice custo ingredientes",
+      milho_rs_media = "Milho",
+      milho_rs_media_modelo = "Milho",
+      soja_rs_media_modelo = "Soja",
+      soja_paranagua_rs_media = "Soja Paranagua",
+      dolar_rs_usd = "Dolar",
+      diesel_rs_litro = "Diesel",
+      ipca_pct = "IPCA",
+      igpm_pct = "IGP-M",
+      selic_pct = "SELIC",
+      brent_usd_media_modelo = "Brent",
+      vix_media_modelo = "VIX"
+    ),
+    significancia = p_sig(p)
+  ) |>
+  dplyr::distinct(
+    resposta,
+    preditor,
+    .keep_all = TRUE
+  )
+
+fig3 <- ggplot2::ggplot(
+  cor_econ,
+  ggplot2::aes(
+    x = rho,
+    y = reorder(
+      preditor,
+      rho
+    ),
+    shape = resposta
+  )
+) +
+  ggplot2::geom_vline(
+    xintercept = 0,
+    linetype = "dashed"
+  ) +
+  ggplot2::geom_point(
+    size = 3
+  ) +
+  ggplot2::geom_text(
+    ggplot2::aes(
+      label = significancia
+    ),
+    nudge_x = 0.05,
+    size = 4
+  ) +
+  ggplot2::facet_wrap(
+    ~ resposta,
+    ncol = 1
+  ) +
+  ggplot2::scale_x_continuous(
+    limits = c(
+      -1,
+      1
+    ),
+    breaks = seq(
+      -1,
+      1,
+      0.25
+    )
+  ) +
+  ggplot2::labs(
+    title = "Figura 3. Associacao da producao com fatores economicos",
+    subtitle = "Correlacao de Spearman; * p<0,05; ** p<0,01; *** p<0,001",
+    x = expression(rho~"de Spearman"),
+    y = NULL,
+    shape = NULL
+  ) +
+  tema_artigo
+
+ggplot2::ggsave(
+  file.path(
+    pasta_saida,
+    "FIGURA_3_PRODUCAO_X_ECONOMIA.png"
+  ),
+  fig3,
+  width = 10,
+  height = 10,
+  dpi = 320
+)
+
+# =====================================================================
+# 9. FIGURA 4
+# PRODUCAO X AMBIENTE
+# =====================================================================
+
+pred_ambiente <- intersect(
+  c(
+    "oni_media_modelo",
+    "precipitacao_mm_anual",
+    "temperatura_media_c_anual",
+    "temperatura_media_anual_c",
+    "umidade_media_pct"
+  ),
+  names(base_anual)
+)
+
+cor_amb <- calcular_correlacoes(
+  base_anual,
+  respostas_prod,
+  pred_ambiente
+) |>
+  dplyr::mutate(
+    resposta = dplyr::recode(
+      resposta,
+      producao_tilapia_t = "Tilapia",
+      producao_peixes_t = "Peixes totais",
+      producao_nativos_t = "Peixes nativos"
+    ),
+    preditor = dplyr::recode(
+      preditor,
+      oni_media_modelo = "ONI / ENSO",
+      precipitacao_mm_anual = "Precipitacao",
+      temperatura_media_c_anual = "Temperatura",
+      temperatura_media_anual_c = "Temperatura anual",
+      umidade_media_pct = "Umidade relativa"
+    ),
+    significancia = p_sig(p)
+  ) |>
+  dplyr::distinct(
+    resposta,
+    preditor,
+    .keep_all = TRUE
+  )
+
+fig4 <- ggplot2::ggplot(
+  cor_amb,
+  ggplot2::aes(
+    x = rho,
+    y = reorder(
+      preditor,
+      rho
+    ),
+    shape = resposta
+  )
+) +
+  ggplot2::geom_vline(
+    xintercept = 0,
+    linetype = "dashed"
+  ) +
+  ggplot2::geom_point(
+    size = 3
+  ) +
+  ggplot2::geom_text(
+    ggplot2::aes(
+      label = significancia
+    ),
+    nudge_x = 0.05,
+    size = 4
+  ) +
+  ggplot2::facet_wrap(
+    ~ resposta,
+    ncol = 1
+  ) +
+  ggplot2::scale_x_continuous(
+    limits = c(
+      -1,
+      1
+    )
+  ) +
+  ggplot2::labs(
+    title = "Figura 4. Associacao da producao com variaveis ambientais",
+    subtitle = "Correlacao de Spearman; associacoes exploratorias em serie anual",
+    x = expression(rho~"de Spearman"),
+    y = NULL,
+    shape = NULL
+  ) +
+  tema_artigo
+
+ggplot2::ggsave(
+  file.path(
+    pasta_saida,
+    "FIGURA_4_PRODUCAO_X_AMBIENTE.png"
+  ),
+  fig4,
+  width = 10,
+  height = 8,
+  dpi = 320
+)
+
+# =====================================================================
+# 10. FIGURA 5
+# HEATMAP SELETIVO: PRODUCAO | CUSTOS | ECONOMIA | AMBIENTE
+# =====================================================================
+
+vars_heat <- intersect(
+  c(
+    "producao_tilapia_t",
+    "producao_peixes_t",
+    "producao_nativos_t",
+    "indice_custo_ingredientes_media",
+    "milho_rs_media_modelo",
+    "soja_rs_media_modelo",
+    "dolar_rs_usd",
+    "diesel_rs_litro",
+    "selic_pct",
+    "vix_media_modelo",
+    "brent_usd_media_modelo",
+    "oni_media_modelo",
+    "precipitacao_mm_anual",
+    "temperatura_media_c_anual",
+    "umidade_media_pct"
+  ),
+  names(base_anual)
+)
+
+mat_heat <- stats::cor(
+  base_anual[
+    vars_heat
+  ],
+  use = "pairwise.complete.obs",
+  method = "spearman"
+)
+
+rotulos <- c(
+  producao_tilapia_t = "Tilapia",
+  producao_peixes_t = "Peixes totais",
+  producao_nativos_t = "Nativos",
+  indice_custo_ingredientes_media = "Indice custo",
+  milho_rs_media_modelo = "Milho",
+  soja_rs_media_modelo = "Soja",
+  dolar_rs_usd = "Dolar",
+  diesel_rs_litro = "Diesel",
+  selic_pct = "SELIC",
+  vix_media_modelo = "VIX",
+  brent_usd_media_modelo = "Brent",
+  oni_media_modelo = "ONI",
+  precipitacao_mm_anual = "Precipitacao",
+  temperatura_media_c_anual = "Temperatura",
+  umidade_media_pct = "Umidade"
+)
+
+novos_nomes <- unname(
+  rotulos[
+    colnames(mat_heat)
+  ]
+)
+
+novos_nomes[
+  is.na(
+    novos_nomes
+  )
+] <- colnames(mat_heat)[
+  is.na(
+    novos_nomes
+  )
+]
+
+colnames(mat_heat) <- novos_nomes
+rownames(mat_heat) <- novos_nomes
+
+png(
+  file.path(
+    pasta_saida,
+    "FIGURA_5_HEATMAP_SELETIVO.png"
+  ),
+  width = 2600,
+  height = 2200,
+  res = 220
+)
+
+corrplot::corrplot(
+  mat_heat,
+  method = "color",
+  type = "upper",
+  order = "original",
+  addCoef.col = "black",
+  number.cex = 0.55,
+  tl.cex = 0.75,
+  tl.col = "black",
+  tl.srt = 45,
+  diag = FALSE,
+  mar = c(
+    0,
+    0,
+    2,
+    0
+  ),
+  title = "Figura 5. Correlacoes entre producao, custos, economia e ambiente"
+)
+
+dev.off()
+
+# =====================================================================
+# 11. FIGURA 6
+# MODELOS: OBSERVADO/PREVISTO + METRICAS + SHAP + RESIDUOS
+# =====================================================================
+
+# -------------------------------------------------------------
+# 11.1 Observado x previsto
+# -------------------------------------------------------------
+
+vars_prev <- intersect(
+  c(
+    "naive",
+    "arimax",
+    "xgboost",
+    "hibrido",
+    "Naive",
+    "ARIMAX",
+    "XGBoost",
+    "Hibrido"
+  ),
+  names(previsoes)
+)
+
+nome_real <- intersect(
+  c(
+    "real",
+    "real_t1"
+  ),
+  names(previsoes)
+)[1]
+
+if (is.na(nome_real)) {
+  stop(
+    "Coluna real/real_t1 nao encontrada em Previsoes_teste."
+  )
+}
+
+prev_long <- previsoes |>
+  dplyr::select(
+    data,
+    dplyr::all_of(nome_real),
+    dplyr::all_of(vars_prev)
+  ) |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(vars_prev),
+    names_to = "modelo",
+    values_to = "previsto"
+  ) |>
+  dplyr::mutate(
+    modelo = stringr::str_to_title(
+      modelo
+    )
+  )
+
+p6a <- ggplot2::ggplot() +
+  ggplot2::geom_line(
+    data = previsoes,
+    ggplot2::aes(
+      x = data,
+      y = .data[[nome_real]]
+    ),
+    linewidth = 1.1
+  ) +
+  ggplot2::geom_point(
+    data = previsoes,
+    ggplot2::aes(
+      x = data,
+      y = .data[[nome_real]]
+    ),
+    size = 1.6
+  ) +
+  ggplot2::geom_line(
+    data = prev_long,
+    ggplot2::aes(
+      x = data,
+      y = previsto,
+      linetype = modelo
+    ),
+    linewidth = 0.75
+  ) +
+  ggplot2::labs(
+    title = "A. Observado x previsto",
+    x = NULL,
+    y = "Indice",
+    linetype = NULL
+  ) +
+  tema_artigo
+
+# -------------------------------------------------------------
+# 11.2 Metricas
+# -------------------------------------------------------------
+
+metricas_teste <- metricas |>
+  dplyr::filter(
+    conjunto == "teste"
+  ) |>
+  dplyr::select(
+    modelo,
+    rmse,
+    mae,
+    mape
+  ) |>
+  tidyr::pivot_longer(
+    cols = c(
+      rmse,
+      mae,
+      mape
+    ),
+    names_to = "metrica",
+    values_to = "valor"
+  ) |>
+  dplyr::mutate(
+    metrica = dplyr::recode(
+      metrica,
+      rmse = "RMSE",
+      mae = "MAE",
+      mape = "MAPE (%)"
+    )
+  )
+
+p6b <- ggplot2::ggplot(
+  metricas_teste,
+  ggplot2::aes(
+    x = modelo,
+    y = valor
+  )
+) +
+  ggplot2::geom_col() +
+  ggplot2::facet_wrap(
+    ~ metrica,
+    scales = "free_y"
+  ) +
+  ggplot2::labs(
+    title = "B. Erro no conjunto de teste",
+    x = NULL,
+    y = NULL
+  ) +
+  tema_artigo +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(
+      angle = 30,
+      hjust = 1
+    )
+  )
+
+# -------------------------------------------------------------
+# 11.3 SHAP top 10
+# -------------------------------------------------------------
+
+nome_feature <- intersect(
+  c(
+    "feature",
+    "variavel"
+  ),
+  names(shap)
+)[1]
+
+nome_shap <- intersect(
+  c(
+    "mean_abs_shap",
+    "media_abs_shap"
+  ),
+  names(shap)
+)[1]
+
+shap_top <- shap |>
+  dplyr::filter(
+    !is.na(
+      .data[[nome_shap]]
+    )
+  ) |>
+  dplyr::arrange(
+    dplyr::desc(
+      .data[[nome_shap]]
+    )
+  ) |>
+  dplyr::slice_head(
+    n = 10
+  )
+
+p6c <- ggplot2::ggplot(
+  shap_top,
+  ggplot2::aes(
+    x = reorder(
+      .data[[nome_feature]],
+      .data[[nome_shap]]
+    ),
+    y = .data[[nome_shap]]
+  )
+) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title = "C. Importancia global SHAP",
+    x = NULL,
+    y = "Media |SHAP|"
+  ) +
+  tema_artigo
+
+# -------------------------------------------------------------
+# 11.4 Residuos do melhor modelo
+# -------------------------------------------------------------
+
+melhor_modelo <- metricas |>
+  dplyr::filter(
+    conjunto == "teste"
+  ) |>
+  dplyr::arrange(
+    rmse
+  ) |>
+  dplyr::slice(1) |>
+  dplyr::pull(modelo)
+
+melhor_coluna <- names(previsoes)[
+  stringr::str_to_lower(
+    names(previsoes)
+  ) ==
+    stringr::str_to_lower(
+      melhor_modelo
+    )
+][1]
+
+if (
+  is.na(melhor_coluna)
+) {
+  
+  candidatos <- vars_prev
+  
+  melhor_coluna <- candidatos[
+    stringr::str_detect(
+      stringr::str_to_lower(
+        candidatos
+      ),
+      stringr::str_to_lower(
+        melhor_modelo
+      )
+    )
+  ][1]
+}
+
+residuos_melhor <- previsoes |>
+  dplyr::transmute(
+    data = data,
+    residuo =
+      .data[[nome_real]] -
+      .data[[melhor_coluna]]
+  )
+
+p6d <- ggplot2::ggplot(
+  residuos_melhor,
+  ggplot2::aes(
+    x = data,
+    y = residuo
+  )
+) +
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.8
+  ) +
+  ggplot2::geom_point(
+    size = 1.6
+  ) +
+  ggplot2::labs(
+    title = paste0(
+      "D. Residuos - ",
+      melhor_modelo
+    ),
+    x = "Data",
+    y = "Erro"
+  ) +
+  tema_artigo
+
+fig6 <- (
+  p6a |
+    p6b
+) /
+  (
+    p6c |
+      p6d
+  ) +
+  patchwork::plot_annotation(
+    title = "Figura 6. Desempenho e interpretabilidade dos modelos"
+  )
+
+ggplot2::ggsave(
+  file.path(
+    pasta_saida,
+    "FIGURA_6_MODELOS_COMPLETA.png"
+  ),
+  fig6,
+  width = 14,
+  height = 10,
+  dpi = 320
+)
+
+# =====================================================================
+# 12. TABELAS AUXILIARES PARA O ARTIGO
+# =====================================================================
+
+readr_disponivel <- requireNamespace(
+  "readr",
+  quietly = TRUE
+)
+
+if (readr_disponivel) {
+  
+  readr::write_csv2(
+    cor_econ,
+    file.path(
+      pasta_saida,
+      "CORRELACOES_ECONOMICAS_FIGURA_3.csv"
+    ),
+    na = ""
+  )
+  
+  readr::write_csv2(
+    cor_amb,
+    file.path(
+      pasta_saida,
+      "CORRELACOES_AMBIENTAIS_FIGURA_4.csv"
+    ),
+    na = ""
+  )
+}
+
+# =====================================================================
+# 13. RESUMO FINAL
+# =====================================================================
+
+cat(
+  "\n============================================================\n"
+)
+
+cat(
+  "FIGURAS FINAIS DO ARTIGO GERADAS\n"
+)
+
+cat(
+  "============================================================\n\n"
+)
+
+cat(
+  "Pasta:\n",
+  pasta_saida,
+  "\n\n"
+)
+
+cat(
+  "1 - FIGURA_1_PRODUCAO_E_PARTICIPACAO.png\n"
+)
+
+cat(
+  "2 - FIGURA_2_CUSTOS_E_CHOQUES.png\n"
+)
+
+cat(
+  "3 - FIGURA_3_PRODUCAO_X_ECONOMIA.png\n"
+)
+
+cat(
+  "4 - FIGURA_4_PRODUCAO_X_AMBIENTE.png\n"
+)
+
+cat(
+  "5 - FIGURA_5_HEATMAP_SELETIVO.png\n"
+)
+
+cat(
+  "6 - FIGURA_6_MODELOS_COMPLETA.png\n\n"
+)
+
+cat(
+  "Melhor modelo no teste:",
+  melhor_modelo,
+  "\n"
+)
+
+cat(
+  "\nUse estas seis figuras no lugar das dezenas de graficos repetitivos.\n"
+)
+    
+# =====================================================================
+# FIM
+# ========================================================
+
